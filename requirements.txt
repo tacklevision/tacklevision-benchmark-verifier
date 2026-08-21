@@ -1,0 +1,12 @@
+# Everything the reproduction needs. No GPU, no vLLM, no torch on this machine.
+# olmocr + playwright are PINNED to the exact versions our published numbers
+# were scored with (playwright 1.61 breaks olmocr 0.4.27's sync scorer calls).
+olmocr[bench]==0.4.27
+playwright==1.60.0
+numpy
+pypdfium2
+requests
+# pinned so HF client behavior can't drift under us (1.x made the xet backend
+# the default, whose per-file API calls rate-limit 1,410-file downloads;
+# get_dataset.sh disables it and this pin keeps that knob meaningful)
+huggingface_hub==1.28.0

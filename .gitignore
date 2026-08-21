@@ -1,0 +1,12 @@
+.venv/
+venv/
+__pycache__/
+bench_data
+olmOCR-bench/
+outputs_*.tar.gz
+receipt_*.json
+*.log
+gallery_*.html
+.tv_last_run
+.python/
+.python_download.tar.gz

@@ -1,0 +1,15 @@
+{
+ "run_id": "6665a6572e5b",
+ "mode": "upload",
+ "dataset": "allenai/olmOCR-bench",
+ "dataset_revision": "54a96a6fb6a2bd3b297e59869491db4d3625b711",
+ "dataset_manifest_sha256": "fded36af2edbe541ee822ffd623d192560b7b14aefdb828b62c2961e94005d51",
+ "model": "tacklevision",
+ "pages": 1403,
+ "output_tree_sha256": "2c98139b6f1ab3d4c004d3886dfc74e693eda20979087c4679d564be0c4e495a",
+ "scorer_pin": "olmocr[bench]==0.4.27",
+ "started_at": 1787163737,
+ "finished_at": 1787164280,
+ "note": "score outputs locally with AllenAI's official tool; our own scoring of this tree is our_score (informational)",
+ "our_score": "86.2"
+}
