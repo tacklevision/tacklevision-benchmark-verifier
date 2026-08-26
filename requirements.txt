@@ -10,3 +10,8 @@ requests
 # the default, whose per-file API calls rate-limit 1,410-file downloads;
 # get_dataset.sh disables it and this pin keeps that knob meaningful)
 huggingface_hub==1.28.0
+# an install-time dependency of olmocr that the scorer never imports.
+# cryptography 49 and newer publish no wheels for Intel Macs, and the
+# hash-locked install refuses to build from source, so it is held below 49
+# to keep the toolchain installable there.
+cryptography<49

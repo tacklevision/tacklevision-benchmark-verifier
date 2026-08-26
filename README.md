@@ -7,7 +7,7 @@ You verify three things yourself, on your machine:
 3. the score, computed by YOU with AllenAI's official scorer. We never touch it.
 
 Needs: Linux or macOS (Windows: WSL), ~10 GB disk, internet. No GPU.
-Python 3.11 or 3.12 if you have it (on Ubuntu/Debian/WSL also `python3-venv`:
+Python 3.12 or newer if you have it (on Ubuntu/Debian/WSL also `python3-venv`:
 `sudo apt install python3.12 python3.12-venv`); if not, verify.sh offers to
 fetch a private, checksum-verified copy into its own folder (asks first,
 touches nothing system-wide). A verification key is free: request one at
@@ -20,13 +20,13 @@ form).
 ```bash
 git clone --branch v1.0.0 --depth 1 https://github.com/tacklevision/tacklevision-benchmark-verifier
 cd tacklevision-benchmark-verifier
-git rev-parse HEAD     # must print RELEASE_COMMIT_SHA_PLACEHOLDER
+git rev-parse HEAD     # must print the commit shown in your approval email
 bash verify.sh --key <your key from the approval email>
 ```
 
 The clone is pinned to release `v1.0.0`; the `git rev-parse HEAD` line lets you
-check that what you are about to run is exactly the audited commit, not
-whatever a branch points at today.
+check that what you are about to run is exactly the audited commit named in
+your approval email, not whatever a branch points at today.
 
 That runs the whole thing with live progress at every step: a check of your
 machine and your key, the hash-pinned toolchain install, the official dataset
@@ -63,7 +63,7 @@ bash score.sh published_run/outputs.tar.gz
 Skeptics are encouraged to run and read the stages individually:
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate   # Python 3.12 or newer
 pip install --require-hashes -r requirements.lock   # hash-pinned scorer toolchain
 bash get_dataset.sh                  # official dataset + manifest proof
 bash submit.sh bench_data            # attested run on our GPU cluster

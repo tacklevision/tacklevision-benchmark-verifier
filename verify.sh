@@ -18,14 +18,16 @@ cd "$HERE"
 
 # ---- constants -------------------------------------------------------------
 TOTAL_STAGES=5
-PY_MIN_MAJOR=3                         # the pinned scorer (olmocr 0.4.27) needs 3.11+
-PY_MIN_MINOR=11
+PY_MIN_MAJOR=3                         # the hash-pinned toolchain (requirements.lock) is built for 3.12+
+PY_MIN_MINOR=12
 # the private CPython offered when no usable Python exists: one exact build of
 # python-build-standalone (the same builds tools like uv ship)
 PBS_RELEASE="20260814"; PBS_VERSION="3.12.14"
 STATE_FILE="$HERE/.tv_last_run"
 PIP_LOG="$HERE/.pip_install.log"
 PIP_ERROR_LINES=5
+PLAYWRIGHT_LOG="$HERE/.playwright_install.log"
+CHROMIUM_SIZE_TEXT="~150 MB"
 
 CYAN=$'\033[36m'
 T0=$(date +%s)
@@ -55,23 +57,55 @@ py_ok() {  # py_ok <interpreter> : at least PY_MIN
   "$1" -c "import sys; sys.exit(0 if sys.version_info >= ($PY_MIN_MAJOR, $PY_MIN_MINOR) else 1)" 2>/dev/null
 }
 
-fail() {  # fail <stage> [exit code of the stage]
-  local code="${2:-1}"
+# the run this folder is working on: '' when there is none (an empty file counts as none)
+LOCAL_RUN=""
+[ -f "$STATE_FILE" ] && LOCAL_RUN=$(tr -d '[:space:]' < "$STATE_FILE")
+
+# fail <stage> [exit code of the stage]: the closing advice, specific to why
+# the stage stopped. The key itself is never echoed back (it is a credential).
+fail() {
+  local code="${2:-1}" rid="$LOCAL_RUN"
+  [ -f "$STATE_FILE" ] && rid=$(tr -d '[:space:]' < "$STATE_FILE")
   echo
   echo "${RED}${BOLD}!! Stage $1 did not finish.${RESET}"
-  if [ "$code" = "$EXIT_KEY_REJECTED" ]; then
-    echo "   Your key is expired or revoked, so running the same command again cannot help."
-    echo "   Request a new key at $KEY_REQUEST_URL (same form), then run"
-    echo "   this command with the new key; everything already on disk is reused:"
-    echo
-    echo "   bash verify.sh --key <new key>"
-    echo
-    exit "$EXIT_KEY_REJECTED"
-  fi
+  case "$code" in
+    "$EXIT_KEY_REJECTED")
+      echo "   Your key is expired or revoked, so running the same command again cannot help."
+      echo "   Request a new key at $KEY_REQUEST_URL (same form), then run"
+      echo "   this command with the new key; the toolchain and dataset on disk are reused:"
+      echo
+      echo "   bash verify.sh --key <new key>"
+      echo
+      if [ -n "$rid" ]; then
+        echo "   Run $rid from this folder stays bound to the key that started it; to have"
+        echo "   it sorted out, reply to your approval email with run id $rid."
+        echo
+      fi
+      exit "$EXIT_KEY_REJECTED";;
+    "$EXIT_RUN_NOT_FOUND")
+      echo "   The gateway does not know run ${rid:-<unknown>} for this key, so rerunning the same"
+      echo "   command cannot help. If you were issued a new key since that run started,"
+      echo "   start over deliberately with:"
+      echo
+      echo "   bash verify.sh --key <your key> --fresh"
+      echo
+      echo "   Otherwise reply to your approval email with run id ${rid:-<unknown>}."
+      echo
+      exit "$EXIT_RUN_NOT_FOUND";;
+    "$EXIT_STUCK")
+      echo "   Run ${rid:-<unknown>} is taking longer than it ever should. It may still finish on"
+      echo "   our side and nothing is lost. Check on it later with:"
+      echo
+      echo "   bash fetch.sh ${rid:-<run id>}"
+      echo
+      echo "   If it is still not done by then, reply to your approval email with run id ${rid:-<unknown>}."
+      echo
+      exit "$EXIT_STUCK";;
+  esac
   echo "   Nothing is lost. Fix the message above if it names a fix, then rerun"
   echo "   the exact same command; every stage resumes where it left off:"
   echo
-  echo "   bash verify.sh --key $KEY"
+  echo "   bash verify.sh --key <your key>"
   echo
   exit 1
 }
@@ -98,13 +132,23 @@ S1=$(date +%s)
 command -v curl >/dev/null || { echo "   curl is required"; fail 1; }
 
 # the key first: a dead key must not cost anyone a toolchain install and a
-# 450 MB download before they find out
+# 450 MB download before they find out. One exception: a run this folder
+# already holds (in progress, or finished and not yet scored) stays readable
+# with the key that started it even after that key expired, so then an
+# expired key only rules out a NEW run and the flow goes on.
+have_local_run() { [ -n "$LOCAL_RUN" ] || ls "$HERE"/outputs_*.tar.gz >/dev/null 2>&1; }
 http_get "$API/runs/preflight"
 case "$HTTP" in
   200|204|404) echo "   ${GREEN}✓${RESET} key accepted by the gateway";;
   401|403)
-    echo "   ${RED}key expired or revoked, request a new one at $KEY_REQUEST_URL${RESET}"
-    fail 1 "$EXIT_KEY_REJECTED";;
+    if have_local_run; then
+      echo "   ${RED}!${RESET} your key is expired or revoked (HTTP $HTTP), so it cannot start a new run."
+      echo "     This folder already holds a run${LOCAL_RUN:+ (id $LOCAL_RUN)}, which can still be"
+      echo "     downloaded and scored, so continuing. A new run needs a new key: $KEY_REQUEST_URL"
+    else
+      echo "   ${RED}key expired or revoked, request a new one at $KEY_REQUEST_URL${RESET}"
+      fail 1 "$EXIT_KEY_REJECTED"
+    fi;;
   429) echo "   the gateway is rate limiting; wait a minute and rerun"; fail 1;;
   000) echo "   could not reach the verification gateway; check your internet connection and rerun."; fail 1;;
   *)   echo "   unexpected answer from the gateway (HTTP $HTTP); wait a minute and rerun"; fail 1;;
@@ -113,14 +157,13 @@ esac
 # find a Python >= PY_MIN. Versioned names come BEFORE bare python3 so a
 # deadsnakes/brew install is found even when the system python3 is older
 # (common on Ubuntu 22.04 and older WSL images; on macOS brew/python.org
-# installs exist but are not first in PATH). 3.12 and 3.11 first: the pinned
-# scorer's wheels are built for them.
+# installs exist but are not first in PATH). 3.12 first: the pinned
+# toolchain was built and tested on it.
 PY=""
 for c in "$HERE/.python/python/bin/python3" \
-         python3.12 python3.11 python3.13 python3 \
+         python3.12 python3.13 python3 \
          /opt/homebrew/bin/python3 /usr/local/bin/python3 \
          /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 \
-         /Library/Frameworks/Python.framework/Versions/3.11/bin/python3 \
          /Library/Frameworks/Python.framework/Versions/3.13/bin/python3; do
   P=$(command -v "$c" 2>/dev/null || true); [ -n "$P" ] || { [ -x "$c" ] && P="$c"; }
   [ -n "${P:-}" ] || continue
@@ -143,14 +186,15 @@ if [ -z "$PY" ]; then
     echo "   Press Enter and verify.sh will download a private, checksum-verified"
     echo "   copy of Python $PBS_VERSION into this folder only (nothing is installed on"
     echo "   your system; delete this folder to remove it)."
-    echo "   Or press Ctrl-C and install Python $PY_MIN_MAJOR.$PY_MIN_MINOR or 3.12 yourself (https://python.org)."
+    echo "   Or press Ctrl-C and install Python $PY_MIN_MAJOR.$PY_MIN_MINOR or newer yourself (https://python.org)."
     read -r _
     PBS_FILE="cpython-${PBS_VERSION}+${PBS_RELEASE}-${PBS_ARCH}-install_only.tar.gz"
     PBS_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE}/${PBS_FILE}"
     echo "   downloading $PBS_FILE"
     echo "   ${DIM}from $PBS_URL${RESET}"
     TMP_TGZ="$HERE/.python_download.tar.gz"
-    curl -L --progress-bar -o "$TMP_TGZ" "$PBS_URL" || { echo "   download failed; rerun to retry"; fail 1; }
+    # -f: an HTTP error page must fail here, not at the checksum
+    curl -fL --progress-bar -o "$TMP_TGZ" "$PBS_URL" || { rm -f "$TMP_TGZ"; echo "   download failed; rerun to retry"; fail 1; }
     GOT_SHA=$( (sha256sum "$TMP_TGZ" 2>/dev/null || shasum -a 256 "$TMP_TGZ") | awk '{print $1}')
     if [ "$GOT_SHA" != "$PBS_SHA" ]; then
       rm -f "$TMP_TGZ"
@@ -163,7 +207,7 @@ if [ -z "$PY" ]; then
     PY="$HERE/.python/python/bin/python3"
     [ -x "$PY" ] || { echo "   extraction failed; rerun to retry"; fail 1; }
   else
-    echo "   Install Python $PY_MIN_MAJOR.$PY_MIN_MINOR or 3.12 from https://python.org, or: brew install python@3.12"
+    echo "   Install Python $PY_MIN_MAJOR.$PY_MIN_MINOR or newer from https://python.org, or: brew install python@3.12"
     echo "   Ubuntu/Debian/WSL: sudo apt install python3.12 python3.12-venv"
     [ -t 0 ] || echo "   (running non-interactively, so verify.sh will not offer its own download)"
     fail 1
@@ -183,19 +227,20 @@ if [ -d .venv ] && ! venv_ok; then
   rm -rf .venv
 fi
 if [ ! -d .venv ]; then
-  # build in .venv.tmp and rename, so an interrupted creation never leaves a
-  # half venv that the next run trips over
-  rm -rf .venv.tmp
-  if ! "$PY" -m venv .venv.tmp; then
-    rm -rf .venv.tmp
+  # created straight at .venv, so bin/activate points at the path the venv
+  # really lives at (`source .venv/bin/activate` works for anyone following the
+  # step-by-step README). An interrupted creation leaves an incomplete venv,
+  # which venv_ok above catches and rebuilds on the next run.
+  if ! "$PY" -m venv .venv; then
+    rm -rf .venv
+    PYVER=$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo 3)
     echo "   ${RED}Could not create the Python environment.${RESET}"
-    echo "   Ubuntu/Debian/WSL: sudo apt install python3-venv   (then rerun the same command)"
+    echo "   Ubuntu/Debian/WSL: sudo apt install python${PYVER}-venv   (then rerun the same command)"
     fail 2
   fi
-  mv .venv.tmp .venv
 fi
-# activate by hand rather than sourcing bin/activate: that script hardcodes
-# the path the venv was created at (.venv.tmp), not the one it lives at now
+# activate by hand: the same effect as sourcing bin/activate, without that
+# script's assumptions about the calling shell
 export VIRTUAL_ENV="$HERE/.venv"
 export PATH="$VIRTUAL_ENV/bin:$PATH"
 unset PYTHONHOME 2>/dev/null || true
@@ -206,15 +251,30 @@ if python3 -m pip install -q --no-color --require-hashes -r requirements.lock > 
   echo "   ${GREEN}✓${RESET} AllenAI's scorer + hash-pinned dependencies ready  ${DIM}($(elapsed $S2))${RESET}"
 else
   echo "   ${RED}pip could not install the pinned toolchain.${RESET} What it reported:"
-  grep -E '^\S*ERROR' "$PIP_LOG" | head -"$PIP_ERROR_LINES" | sed 's/^/   /' || true
+  grep -E '^[^[:space:]]*ERROR' "$PIP_LOG" | head -"$PIP_ERROR_LINES" | sed 's/^/   /' || true
   echo "   full log: $PIP_LOG"
   fail 2
 fi
 # the scorer renders math in headless chromium; make sure it can launch NOW,
 # before any GPU time is spent (idempotent: instant no-op once installed)
-python3 -m playwright install chromium >/dev/null 2>&1 || true
-python3 - <<'PY' || { echo "   ${RED}chromium cannot launch.${RESET} On minimal Linux, missing OS libraries are the usual cause:"; \
-  echo "   sudo $HERE/.venv/bin/python -m playwright install-deps chromium   (then rerun the same command)"; fail 2; }
+chromium_failed() {
+  echo "   ${RED}chromium cannot launch.${RESET}"
+  case "$(uname -s)" in
+    Linux)
+      echo "   On minimal Linux, missing OS libraries are the usual cause. Fix, then rerun the same command:"
+      echo "   sudo $HERE/.venv/bin/python -m playwright install-deps chromium"
+      echo "   (download log: $PLAYWRIGHT_LOG)";;
+    Darwin)
+      echo "   Open $PLAYWRIGHT_LOG; on macOS this is usually a network or proxy issue"
+      echo "   during the chromium download. Once that is sorted, rerun the same command.";;
+    *)
+      echo "   See $PLAYWRIGHT_LOG, then rerun the same command.";;
+  esac
+  fail 2
+}
+echo "   downloading chromium ($CHROMIUM_SIZE_TEXT, one time; skipped when already present)"
+python3 -m playwright install chromium > "$PLAYWRIGHT_LOG" 2>&1 || true
+python3 - <<'PY' || chromium_failed
 from playwright.sync_api import sync_playwright
 with sync_playwright() as p:
     p.chromium.launch(headless=True).close()
@@ -234,7 +294,8 @@ echo "   ${GREEN}✓${RESET} official dataset on disk and proven authentic  ${DI
 stage 4 "Running all $TOTAL_PAGES_TEXT pages on TackleAI's GPU cluster"
 S4=$(date +%s)
 bash submit.sh ${FRESH_ARG:+--fresh} "$HERE/bench_data" || fail 4 $?
-RUN_ID=$(tr -d '[:space:]' < "$STATE_FILE" 2>/dev/null || true)
+RUN_ID=""
+[ -f "$STATE_FILE" ] && RUN_ID=$(tr -d '[:space:]' < "$STATE_FILE")
 OUT_TAR="outputs_${RUN_ID}.tar.gz"
 [ -n "$RUN_ID" ] && [ -f "$OUT_TAR" ] || { echo "   run finished but $OUT_TAR is not here"; fail 4; }
 echo "   ${GREEN}✓${RESET} raw outputs + receipt downloaded  ${DIM}($(elapsed $S4))${RESET}"
@@ -247,6 +308,6 @@ bash score.sh "$OUT_TAR" || fail 5 $?
 # before this line re-downloads or re-scores the same run, never a new one
 rm -f "$STATE_FILE"
 
-echo "${DIM}  Total time: $(elapsed $T0). Run it again any time: bash verify.sh --key $KEY"
-echo "  (a deliberate new run: bash verify.sh --key $KEY --fresh)${RESET}"
+echo "${DIM}  Total time: $(elapsed $T0). Run it again any time: bash verify.sh --key <your key>"
+echo "  (this starts a new run; add --fresh to be explicit)${RESET}"
 echo

@@ -16,8 +16,8 @@ outputs across protocol changes (prompt/decode/model updates).
 
 Exit codes: 0 all pages written; 1 some pages failed (rerun retries just
 those) or the endpoint rejected the key; 3 the endpoint looks down (a run of
-connection-class failures with no success at all), so nothing was attempted
-past that point and a rerun resumes.
+connection-class failures with no success at all, or none recently), so
+nothing was attempted past that point and a rerun resumes.
 """
 import argparse, base64, concurrent.futures as cf, hashlib, io, json, os, sys, threading, time
 import pypdfium2 as pdfium
@@ -40,6 +40,7 @@ CONNECT_TIMEOUT = _num(os.environ.get("CONNECT_TIMEOUT", "10"))     # TCP connec
 READ_TIMEOUT = _num(os.environ.get("READ_TIMEOUT", "900"))          # waiting for the reply, seconds
 RETRIES = int(os.environ.get("RETRIES", "3"))                       # attempts per page
 BREAKER_CONSECUTIVE = int(os.environ.get("BREAKER_CONSECUTIVE", "20"))  # see Breaker
+BREAKER_QUIET_SECONDS = _num(os.environ.get("BREAKER_QUIET_SECONDS", "300"))  # see Breaker
 EXIT_ENDPOINT_UNREACHABLE = 3
 
 
@@ -53,15 +54,21 @@ class EndpointDown(RuntimeError):
 
 class Breaker:
     """Counts connection-class failures (refused, reset, timeout, 5xx) across all
-    threads. Trips after BREAKER_CONSECUTIVE of them in a row while no page has
-    ever succeeded: that is an endpoint outage, and grinding through 1,403 pages
-    times RETRIES against a dead endpoint helps nobody. One success anywhere
-    proves the endpoint is up, after which per-page failures stay per-page."""
+    threads and trips when the endpoint, not a page, is the problem:
+      * BREAKER_CONSECUTIVE failures in a row while no page has ever succeeded
+        (the endpoint was never up), or
+      * BREAKER_CONSECUTIVE failures in a row with no success in the last
+        BREAKER_QUIET_SECONDS (it was up and went away mid-run).
+    Grinding through 1,403 pages times RETRIES against a dead endpoint helps
+    nobody; a rerun resumes. A success resets the streak, so per-page failures
+    on a live endpoint stay per-page."""
 
-    def __init__(self, limit):
+    def __init__(self, limit, quiet_seconds):
         self.limit = limit
+        self.quiet_seconds = quiet_seconds
         self.consecutive = 0
         self.successes = 0
+        self.last_success_at = None
         self.last_error = ""
         self.tripped = threading.Event()
         self._lock = threading.Lock()
@@ -70,12 +77,15 @@ class Breaker:
         with self._lock:
             self.consecutive = 0
             self.successes += 1
+            self.last_success_at = time.monotonic()
 
     def failure(self, err):
         with self._lock:
             self.consecutive += 1
             self.last_error = str(err)[:200]
-            if self.successes == 0 and self.consecutive >= self.limit:
+            if self.consecutive < self.limit:
+                return
+            if self.successes == 0 or time.monotonic() - self.last_success_at >= self.quiet_seconds:
                 self.tripped.set()
 
 
@@ -199,7 +209,7 @@ def main():
     print(f"{len(jobs)} pages")
     tally = {"ok": 0, "skip": 0, "err": 0, "aborted": 0}
     done = 0
-    breaker = Breaker(BREAKER_CONSECUTIVE)
+    breaker = Breaker(BREAKER_CONSECUTIVE, BREAKER_QUIET_SECONDS)
     with cf.ThreadPoolExecutor(args.concurrency) as ex:
         futs = [ex.submit(one, args, cat, fn, breaker) for cat, fn in jobs]
         try:
@@ -219,8 +229,9 @@ def main():
         except EndpointDown as e:
             for p in futs:
                 p.cancel()
+            since = (f"in the last {BREAKER_QUIET_SECONDS} s" if breaker.successes else "at all")
             print(f"!! the endpoint looks unreachable: {BREAKER_CONSECUTIVE} connection failures in a row "
-                  f"and no page has succeeded ({e}).\n"
+                  f"and no page has succeeded {since} ({e}).\n"
                   f"   Nothing is lost. Re-run the same command once it is back; completed pages are skipped.",
                   file=sys.stderr)
             sys.exit(EXIT_ENDPOINT_UNREACHABLE)

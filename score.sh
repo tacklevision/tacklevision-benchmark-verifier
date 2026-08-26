@@ -112,11 +112,18 @@ SCORE=$(tr '\r' '\n' < "$SCORER_LOG" | grep "average of per-JSONL scores" | tail
 if [ -n "${TV_API_KEY:-}" ] && [ -n "$SCORE" ] && [ -f "$HERE/receipt_${RUN_TAG}.json" ]; then
   KEY="$TV_API_KEY"
   http_post "$API/runs/${RUN_TAG}/result" "{\"score\": $SCORE}"
+  MSG=$(echo "$BODY" | j error)
   case "$HTTP" in
     200) echo "   Your score ($SCORE) is recorded on the independent-run ledger. Thank you.";;
     401|403)
-      echo "   ${DIM}your key has expired, so this score was not recorded on the ledger;"
-      echo "   your outputs and receipt are saved; rerun score.sh later to record the score (with a new key)${RESET}";;
+      # a run is bound to the key that started it; a new key would not reach it
+      echo "   ${DIM}this key can no longer reach run ${RUN_TAG} (HTTP $HTTP), so the score was not"
+      echo "   recorded on the ledger. Your outputs and receipt are saved;"
+      echo "   reply to your approval email with run id ${RUN_TAG} and your score ($SCORE).${RESET}";;
+    409)
+      # the ledger refused on purpose (run not finished on our side, or already recorded)
+      echo "   ${DIM}the ledger did not record this score (HTTP 409): ${MSG:-no reason given}"
+      echo "   your outputs and receipt are saved; rerun score.sh later to record the score${RESET}";;
     *)
       echo "   ${DIM}(could not reach the ledger to record $SCORE (HTTP $HTTP);"
       echo "   your outputs and receipt are saved; rerun score.sh later to record the score)${RESET}";;

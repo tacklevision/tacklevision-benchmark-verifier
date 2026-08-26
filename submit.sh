@@ -39,9 +39,23 @@ ATTEST=$(python3 "$HERE/integrity/manifest.py" hash "$DATA")
 echo "   ${GREEN}proven${RESET}: your 1,410 files are byte-identical to AllenAI's pinned revision"
 
 RUN_ID=""
+# ---- a create request that never got its answer is replayed first ----------
+# Its client_ref was written to disk before the request left (see below); the
+# gateway returns the run it made for that reference, or makes it now, never a
+# second one. This comes BEFORE the resume check on purpose: a --fresh attempt
+# whose answer was lost must be rejoined, not shadowed by the older run this
+# folder finished earlier.
+REF=""
+[ -f "$PENDING_FILE" ] && REF=$(tr -d '[:space:]' < "$PENDING_FILE")
+OLD_ID=""
+if [ -n "$REF" ]; then
+  echo ">> an earlier attempt sent a run request without getting its answer; replaying it (nothing is duplicated)"
+elif [ -z "$FRESH" ] && [ -f "$STATE_FILE" ]; then
+  OLD_ID=$(tr -d '[:space:]' < "$STATE_FILE")   # an empty file means no run
+fi
+
 # ---- resume: never start a new run while this folder has one ---------------
-if [ -z "$FRESH" ] && [ -f "$STATE_FILE" ]; then
-  OLD_ID=$(tr -d '[:space:]' < "$STATE_FILE")
+if [ -n "$OLD_ID" ]; then
   http_get "$API/runs/$OLD_ID"
   case "$HTTP" in
     200)
@@ -68,9 +82,10 @@ if [ -z "$FRESH" ] && [ -f "$STATE_FILE" ]; then
           echo "   Not starting a new run on a guess; rerun in a minute."; exit 1;;
       esac;;
     401|403)
-      echo "!! your key expired or was revoked (HTTP $HTTP)."
-      echo "   Your previous run $OLD_ID finishes on our side; request a new key at"
-      echo "   $KEY_REQUEST_URL and rerun to fetch it."
+      # an expired key still reads its own runs; a refusal here means revoked
+      echo "!! your key was revoked (HTTP $HTTP), so it can no longer reach run $OLD_ID."
+      echo "   The run finishes on our side and stays bound to the key that started it;"
+      echo "   reply to your approval email with run id $OLD_ID and we will sort it out."
       exit "$EXIT_KEY_REJECTED";;
     404)
       echo "!! your previous run $OLD_ID is not reachable with this key (HTTP 404)."
@@ -90,8 +105,6 @@ if [ -z "$RUN_ID" ]; then
   # client_ref is written to disk BEFORE the request leaves, so a rerun after a
   # dropped response replays the same reference and the gateway returns the
   # run it already created instead of a second one
-  REF=""
-  [ -f "$PENDING_FILE" ] && REF=$(tr -d '[:space:]' < "$PENDING_FILE")
   if [ -z "$REF" ]; then
     REF=$(python3 -c 'import uuid; print(uuid.uuid4())')
     echo "$REF" > "$PENDING_FILE"
@@ -107,11 +120,13 @@ if [ -z "$RUN_ID" ]; then
       echo "   run id: ${BOLD}$RUN_ID${RESET}   ${DIM}(save this; rejoin any time with: bash fetch.sh $RUN_ID)${RESET}"
       echo "   dataset revision: $(echo "$BODY" | j dataset_revision)";;
     401|403)
+      rm -f "$PENDING_FILE"       # refused for good; a later attempt starts clean
       echo "!! could not start the run (HTTP $HTTP)"
       [ -n "$MSG" ] && echo "   server says: $MSG"
       echo "   your key expired or was revoked; request a new one at $KEY_REQUEST_URL"
       exit "$EXIT_KEY_REJECTED";;
     409)
+      rm -f "$PENDING_FILE"       # refused for good; nothing to replay
       echo "!! could not start the run (HTTP 409)"
       [ -n "$MSG" ] && echo "   server says: $MSG"
       for id in $(echo "$BODY" | jlist open_runs); do
@@ -125,6 +140,7 @@ if [ -z "$RUN_ID" ]; then
       echo "   (if the request did get through, the rerun picks up that same run; nothing is duplicated)"
       exit 1;;
     *)
+      case "$HTTP" in 4*) rm -f "$PENDING_FILE";; esac   # a definite refusal is not replayed; a 5xx is
       echo "!! could not start the run (HTTP $HTTP)"
       [ -n "$MSG" ] && echo "   server says: $MSG"
       exit 1;;

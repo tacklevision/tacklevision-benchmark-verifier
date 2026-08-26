@@ -1,0 +1,6 @@
+# LF everywhere: these files are executed (bash refuses CRLF shebangs) or hashed
+*.sh   text eol=lf
+*.py   text eol=lf
+*.txt  text eol=lf
+*.lock text eol=lf
+*.md   text eol=lf

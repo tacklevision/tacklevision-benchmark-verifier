@@ -20,9 +20,12 @@ HTTP_TIMEOUT="${TV_HTTP_TIMEOUT:-30}"                     # per API call, second
 # ---- polling ---------------------------------------------------------------
 POLL_SECONDS="${TV_POLL_SECONDS:-15}"                     # between status checks
 RETRY_WARN_AFTER="${TV_RETRY_WARN_AFTER:-4}"              # failed checks in a row before the one warning line
-RATE_LIMIT_BACKOFF_SECONDS="${TV_RATE_LIMIT_BACKOFF_SECONDS:-60}"   # after an HTTP 429
+RATE_LIMIT_BACKOFF_SECONDS="${TV_RATE_LIMIT_BACKOFF_SECONDS:-60}"   # after an HTTP 429 (or an edge block, see http_get)
 MAX_QUEUED_SECONDS="${TV_MAX_QUEUED_SECONDS:-5400}"       # 90 min queued = something is wrong
-STALL_SECONDS="${TV_STALL_SECONDS:-900}"                  # 15 min with no page progress while running
+# 20 min with no page progress while running. Our side watches for stalls too
+# and restarts the run itself (15 min, plus a restart margin); this must stay
+# ABOVE that, so the client declares a stall only when our side did not act.
+STALL_SECONDS="${TV_STALL_SECONDS:-1200}"
 MAX_POLL_MINUTES="${TV_MAX_POLL_MINUTES:-180}"            # absolute cap on one sitting
 MAX_TOTAL_SECONDS="${TV_MAX_TOTAL_SECONDS:-$((MAX_POLL_MINUTES * 60))}"
 SCORING_PHASE_MINUTES=2                                   # our packaging + own score after the last page
@@ -40,6 +43,7 @@ EXIT_STUCK=5              # a wait cap fired; the run may still finish on our si
 
 BOLD=$'\033[1m'; DIM=$'\033[2m'; GREEN=$'\033[32m'; RED=$'\033[31m'; RESET=$'\033[0m'
 BAR_W=24
+STATUS_W=60               # text width of one \r status line (78 columns with the prefix; Terminal opens at 80)
 
 # ---- JSON helpers (python3 is required by every script anyway) -------------
 j() {  # j <field>  : print one top-level field of the JSON on stdin ('' when absent/null/not JSON)
@@ -64,11 +68,21 @@ except Exception:
 # ---- HTTP: always capture the status code, never let curl -f hide it -------
 # http_get <url> / http_post <url> <json>  -> sets HTTP (000 on transport
 # failure) and BODY. Safe under set -e.
+#
+# The gateway itself answers 401/403 with a JSON body carrying `error`. A 403
+# WITHOUT it never came from the gateway: it is the edge in front of it
+# blocking the request as too frequent (typically an HTML page). That says
+# nothing about the key, so it is reported and handled as a 429: back off,
+# retry.
+edge_block_as_429() {
+  if [ "$HTTP" = "403" ] && [ -z "$(printf '%s' "$BODY" | j error)" ]; then HTTP="429"; fi
+}
 http_get() {
   local tmp; tmp=$(mktemp "${TMPDIR:-/tmp}/tv_http.XXXXXX")
   HTTP=$(curl -s -m "$HTTP_TIMEOUT" -o "$tmp" -w '%{http_code}' -H "x-api-key: $KEY" "$1" 2>/dev/null) || HTTP="000"
   [ -n "$HTTP" ] || HTTP="000"
   BODY=$(cat "$tmp" 2>/dev/null || true); rm -f "$tmp"
+  edge_block_as_429
 }
 http_post() {
   local tmp; tmp=$(mktemp "${TMPDIR:-/tmp}/tv_http.XXXXXX")
@@ -76,6 +90,7 @@ http_post() {
            -H "x-api-key: $KEY" -H "Content-Type: application/json" -d "$2" "$1" 2>/dev/null) || HTTP="000"
   [ -n "$HTTP" ] || HTTP="000"
   BODY=$(cat "$tmp" 2>/dev/null || true); rm -f "$tmp"
+  edge_block_as_429
 }
 
 # dl <url> <out>: download with retries into <out>.part, rename on success.
@@ -95,10 +110,14 @@ dl() {
 }
 
 # ---- messages --------------------------------------------------------------
+# A run is bound to the key that started it, and that key keeps reading its
+# own runs after it expires. So a 401/403 while polling means the key was
+# revoked, and a new key would not reach the run: the approval email is the
+# way to get it sorted.
 key_rejected_mid_run() {  # key_rejected_mid_run <run_id>
-  echo "!! your key expired or was revoked while the run was in progress (HTTP $HTTP)."
-  echo "   The run (id $1) finishes on our side; request a new key at"
-  echo "   $KEY_REQUEST_URL and rerun to fetch it."
+  echo "!! your key was revoked while the run was in progress (HTTP $HTTP)."
+  echo "   The run (id $1) finishes on our side and stays bound to the key that started it;"
+  echo "   reply to your approval email with run id $1 and we will sort it out."
 }
 run_not_found() {  # run_not_found <run_id>
   echo "!! the gateway does not know run $1 for this key (HTTP 404);"
@@ -117,6 +136,11 @@ already_downloaded() {  # already_downloaded <run_id> : outputs + receipt presen
 }
 
 # ---- the poll loop, shared by submit.sh and fetch.sh -----------------------
+# status_line <min> <sec> <text>: one \r-overwritten progress line, always the
+# same width (78 columns), so it never wraps in an 80-column terminal and
+# fully covers the previous one
+status_line() { printf "\r   elapsed %02d:%02d  %-${STATUS_W}.${STATUS_W}s" "$1" "$2" "$3"; }
+
 # poll_run <run_id>: poll until the run is done (BODY then holds the final
 # JSON, return 0). Every other outcome prints why and EXITS with a code
 # verify.sh understands. Queue position, the scoring phase and stalls are
@@ -124,6 +148,7 @@ already_downloaded() {  # already_downloaded <run_id> : outputs + receipt presen
 poll_run() {
   local rid="$1" start now el min sec fails=0 st p t phase pos eta key last_key="" last_change queued_since=0 header=0 bar fill i
   start=$(date +%s); last_change=$start
+  echo "   ${DIM}(safe to Ctrl-C and rerun the same command later; nothing is lost)${RESET}"
   while true; do
     http_get "$API/runs/$rid"
     now=$(date +%s); el=$((now - start)); min=$((el / 60)); sec=$((el % 60))
@@ -132,7 +157,7 @@ poll_run() {
       401|403) printf "\n"; key_rejected_mid_run "$rid"; exit "$EXIT_KEY_REJECTED";;
       404) printf "\n"; run_not_found "$rid"; exit "$EXIT_RUN_NOT_FOUND";;
       429)
-        printf "\r   elapsed %02d:%02d  the gateway is rate limiting; waiting %ss before the next check   " "$min" "$sec" "$RATE_LIMIT_BACKOFF_SECONDS"
+        status_line "$min" "$sec" "the gateway is rate limiting; next check in ${RATE_LIMIT_BACKOFF_SECONDS}s"
         sleep "$RATE_LIMIT_BACKOFF_SECONDS"; continue;;
       *)
         fails=$((fails + 1))
@@ -140,23 +165,25 @@ poll_run() {
           printf "\n"
           echo "   gateway unreachable, still retrying (Ctrl-C is safe; rejoin later with: bash fetch.sh $rid)"
         fi
-        printf "\r   elapsed %02d:%02d  waiting for the gateway (HTTP %s)                  " "$min" "$sec" "$HTTP";;
+        status_line "$min" "$sec" "waiting for the gateway (HTTP $HTTP)";;
     esac
     if [ "$HTTP" = "200" ]; then
       st=$(echo "$BODY" | j status); p=$(echo "$BODY" | j pages_done); t=$(echo "$BODY" | j pages_total)
       phase=$(echo "$BODY" | j phase)
+      # the queue clock measures ONE stay in the queue: a run that was running
+      # and is queued again (our side requeued it) starts a fresh one
+      [ "$st" = "queued" ] || queued_since=0
       case "$st" in
-        done) printf "\r   elapsed %02d:%02d  done%-60s\n" "$min" "$sec" ""; return 0;;
+        done) status_line "$min" "$sec" "done"; printf "\n"; return 0;;
         failed|rejected|expired)
           printf "\n"; echo "!! run $rid is '$st': $(echo "$BODY" | j error)"; exit 1;;
         queued)
           [ "$queued_since" -gt 0 ] || queued_since=$now
           pos=$(echo "$BODY" | j queue_position); eta=$(echo "$BODY" | j eta_minutes)
           if [ -n "$pos" ] && [ -n "$eta" ] && [ "$pos" -ge 1 ] 2>/dev/null; then
-            printf "\r   elapsed %02d:%02d  queued: %d run(s) ahead, yours starts in ~%s min; safe to Ctrl-C and rerun the same command later   " \
-              "$min" "$sec" "$((pos - 1))" "$eta"
+            status_line "$min" "$sec" "queued: $((pos - 1)) run(s) ahead, yours starts in ~$eta min"
           else
-            printf "\r   elapsed %02d:%02d  queued (waiting for a free slot on our side); safe to Ctrl-C and rerun the same command later   " "$min" "$sec"
+            status_line "$min" "$sec" "queued (waiting for a free slot on our side)"
           fi
           if [ $((now - queued_since)) -gt "$MAX_QUEUED_SECONDS" ]; then
             printf "\n"
@@ -172,18 +199,17 @@ poll_run() {
             header=1
           fi
           if [ "$phase" = "scoring" ]; then
-            printf "\r   elapsed %02d:%02d  running %s/%s pages (packaging + our own score, ~%s min)      " \
-              "$min" "$sec" "${p:-?}" "${t:-?}" "$SCORING_PHASE_MINUTES"
+            status_line "$min" "$sec" "running ${p:-?}/${t:-?} pages (packaging + our own score, ~$SCORING_PHASE_MINUTES min)"
           elif [ -n "$p" ] && [ -n "$t" ] && [ "$t" -gt 0 ] 2>/dev/null; then
             fill=$((p * BAR_W / t)); bar=""; i=0
             while [ "$i" -lt "$BAR_W" ]; do
               if [ "$i" -lt "$fill" ]; then bar="${bar}#"; else bar="${bar}."; fi; i=$((i + 1))
             done
-            printf "\r   elapsed %02d:%02d  running  %s  %s/%s pages                " "$min" "$sec" "$bar" "$p" "$t"
+            status_line "$min" "$sec" "running  $bar  $p/$t pages"
           else
-            printf "\r   elapsed %02d:%02d  running (warming up)                                   " "$min" "$sec"
+            status_line "$min" "$sec" "running (warming up)"
           fi;;
-        *) printf "\r   elapsed %02d:%02d  %s                                  " "$min" "$sec" "${st:-waiting}";;
+        *) status_line "$min" "$sec" "${st:-waiting}";;
       esac
       key="$st/$p/$t/$phase"
       if [ "$key" != "$last_key" ]; then last_key="$key"; last_change=$now; fi

@@ -11,5 +11,4 @@ gallery_*.html
 .python/
 .python_download.tar.gz
 .tv_pending
-.venv.tmp/
 *.part
