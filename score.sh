@@ -2,38 +2,74 @@
 # score.sh <outputs_RUNID.tar.gz>: score run outputs with AllenAI's official
 # tool, locally, on your machine. Run from the verifier repo dir after setup
 # (venv + dataset download): the scorer needs bench_data + your outputs.
+#
+# Before scoring, the outputs are checked against the receipt that came with
+# them: integrity/tree_hash.py recomputes output_tree_sha256 over every file
+# in the tar and it must equal the receipt's value, or nothing is scored.
 set -euo pipefail
 TAR="${1:?usage: score.sh outputs_<run>.tar.gz}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-BD="$HERE/bench_data"
+# shellcheck disable=SC1091
+. "$HERE/client_common.sh"
+
+# ---- constants -------------------------------------------------------------
+PINNED_MANIFEST="fded36af2edbe541ee822ffd623d192560b7b14aefdb828b62c2961e94005d51"
 GALLERY_SAMPLES=12
-BOLD=$'\033[1m'; GREEN=$'\033[32m'; DIM=$'\033[2m'; RESET=$'\033[0m'
+CLAIM_TEXT="86.1 to 86.6"          # the published claim being checked
+BD="$HERE/bench_data"
+
 [ -d "$BD/pdfs" ] || { echo "!! bench_data not found next to score.sh. Run get_dataset.sh first, from the verifier repo."; exit 1; }
+[ -f "$TAR" ] || { echo "!! $TAR not found"; exit 1; }
 
 RUN_TAG="$(basename "$TAR" .tar.gz)"; RUN_TAG="${RUN_TAG#outputs_}"
 SCORER_LOG="$HERE/scorer_${RUN_TAG}.log"
+TAR_DIR="$(cd "$(dirname "$TAR")" && pwd)"
 
 echo "${BOLD}>> proving the dataset on this machine is the official one${RESET}"
-python3 "$HERE/integrity/manifest.py" verify "$BD" \
-  --expected-hash "fded36af2edbe541ee822ffd623d192560b7b14aefdb828b62c2961e94005d51" \
+python3 "$HERE/integrity/manifest.py" verify "$BD" --expected-hash "$PINNED_MANIFEST" \
   || { echo "!! your local dataset does not match the pinned official revision"; exit 2; }
 
-# the scorer renders math in headless chromium; make sure it exists
-# (idempotent: instant no-op when already installed)
-python3 -m playwright install chromium >/dev/null 2>&1 || true
-python3 - <<'PY' || { echo "!! chromium cannot launch. Try: python3 -m playwright install chromium"; \
-  echo "   (on minimal Linux: sudo python3 -m playwright install-deps chromium)"; exit 1; }
-from playwright.sync_api import sync_playwright
-with sync_playwright() as p:
-    p.chromium.launch(headless=True).close()
-PY
-
+# ---- unpack, then hold the outputs to their receipt ------------------------
 STAGE="$(mktemp -d)/bench_data"
 mkdir -p "$STAGE"
 for f in "$BD"/*.jsonl; do ln -s "$f" "$STAGE/$(basename "$f")"; done
 ln -s "$BD/pdfs" "$STAGE/pdfs"
 mkdir -p "$STAGE/tacklevision"
 tar -xzf "$TAR" --strip-components=1 -C "$STAGE/tacklevision"
+
+# the receipt sits next to the outputs: receipt_<run>.json for gateway runs,
+# receipt.json in published_run/
+RECEIPT=""
+for cand in "$HERE/receipt_${RUN_TAG}.json" "$TAR_DIR/receipt_${RUN_TAG}.json" "$TAR_DIR/receipt.json"; do
+  if [ -f "$cand" ]; then RECEIPT="$cand"; break; fi
+done
+if [ -n "$RECEIPT" ]; then
+  EXPECT=$(j output_tree_sha256 < "$RECEIPT")
+  if [ -n "$EXPECT" ]; then
+    echo "${BOLD}>> checking the outputs against their receipt (output_tree_sha256)${RESET}"
+    python3 "$HERE/integrity/tree_hash.py" "$STAGE/tacklevision" --expect "$EXPECT" || {
+      echo "!! the outputs in $(basename "$TAR") do not match the receipt's output_tree_sha256."
+      echo "   This is not the tree we produced for that run (a damaged download, or edited files)."
+      echo "   Not scoring it. Re-download with: bash fetch.sh <run id>"
+      exit 2; }
+    echo "   ${GREEN}matches the receipt${RESET}: output tree $EXPECT"
+  else
+    echo "   (receipt $(basename "$RECEIPT") carries no output_tree_sha256; skipping the tree-hash check)"
+  fi
+else
+  echo "   (no receipt found next to $(basename "$TAR"); skipping the tree-hash check."
+  echo "    gateway runs save receipt_<run id>.json beside the outputs)"
+fi
+
+# the scorer renders math in headless chromium; make sure it exists
+# (idempotent: instant no-op when already installed)
+python3 -m playwright install chromium >/dev/null 2>&1 || true
+python3 - <<'PY' || { echo "!! chromium cannot launch. Try: python3 -m playwright install chromium"; \
+  echo "   (on minimal Linux: sudo $(command -v python3) -m playwright install-deps chromium)"; exit 1; }
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    p.chromium.launch(headless=True).close()
+PY
 
 # something better than staring at a progress bar: a browsable gallery of the
 # actual benchmark pages (their verified local copies) next to what the model
@@ -53,7 +89,7 @@ echo "   TIMING: the FIRST scoring run on a machine takes 20-40 minutes; it rend
 echo "   thousands of math equations in a browser once and caches them. The ETA on"
 echo "   its progress bar is misleading early on. Repeat runs take a few minutes."
 echo
-echo "   The published claim you are about to check: ${BOLD}86.1 to 86.6${RESET}"
+echo "   The published claim you are about to check: ${BOLD}$CLAIM_TEXT${RESET}"
 echo
 
 # stdout (summary + per-test results) is preserved verbatim for inspection;
@@ -61,7 +97,7 @@ echo
 python3 -m olmocr.bench.benchmark --dir "$STAGE" | tee "$SCORER_LOG"
 
 # the same numbers, readable
-python3 "$HERE/protocol/verdict.py" "$SCORER_LOG" --receipt "$HERE/receipt_${RUN_TAG}.json" || true
+python3 "$HERE/protocol/verdict.py" "$SCORER_LOG" ${RECEIPT:+--receipt "$RECEIPT"} || true
 
 if [ -f "$GALLERY" ]; then
   echo "   See what was tested, page by page (opens in a browser):"
@@ -74,13 +110,17 @@ fi
 SCORE=$(tr '\r' '\n' < "$SCORER_LOG" | grep "average of per-JSONL scores" | tail -1 \
         | grep -oE "[0-9]+\.[0-9]+" | head -1 || true)
 if [ -n "${TV_API_KEY:-}" ] && [ -n "$SCORE" ] && [ -f "$HERE/receipt_${RUN_TAG}.json" ]; then
-  API="${TV_API_URL:-https://mk7y315169.execute-api.us-east-1.amazonaws.com/v1}"
-  if curl -sf -X POST -H "x-api-key: $TV_API_KEY" -H "Content-Type: application/json" \
-       -d "{\"score\": $SCORE}" "$API/runs/${RUN_TAG}/result" >/dev/null 2>&1; then
-    echo "   Your score ($SCORE) is recorded on the independent-run ledger. Thank you."
-  else
-    echo "   ${DIM}(could not reach the ledger to record $SCORE; your receipt still proves the run)${RESET}"
-  fi
+  KEY="$TV_API_KEY"
+  http_post "$API/runs/${RUN_TAG}/result" "{\"score\": $SCORE}"
+  case "$HTTP" in
+    200) echo "   Your score ($SCORE) is recorded on the independent-run ledger. Thank you.";;
+    401|403)
+      echo "   ${DIM}your key has expired, so this score was not recorded on the ledger;"
+      echo "   your outputs and receipt are saved; rerun score.sh later to record the score (with a new key)${RESET}";;
+    *)
+      echo "   ${DIM}(could not reach the ledger to record $SCORE (HTTP $HTTP);"
+      echo "   your outputs and receipt are saved; rerun score.sh later to record the score)${RESET}";;
+  esac
   echo
 fi
 

@@ -9,10 +9,28 @@
 # on this machine. About 20 minutes on a ~20 Mbps uplink.
 #
 # <model> must match a name advertised by <endpoint>/v1/models.
+#
+# This script talks to whatever OpenAI-compatible endpoint you name. It does
+# NOT talk to the TackleAI verification gateway and a tv- verification key is
+# not an endpoint key; for a verified run on our pool use verify.sh.
 set -euo pipefail
 MODEL="${1:?usage: reproduce.sh <model> --endpoint URL [--key KEY]}"; shift
+HERE="$(cd "$(dirname "$0")" && pwd)"
+
+# ---- constants -------------------------------------------------------------
+# CONCURRENCY is the protocol's single global in-flight cap: at most this many
+# pages are in flight against the endpoint at once, no matter how the work is
+# split. 32 is the value our published numbers were measured with (a batch
+# job wants the backend full; one global number is the only knob). Anything
+# else is a different serving regime, so it is allowed but flagged.
+PROTOCOL_CONCURRENCY=32
+CONCURRENCY="${CONCURRENCY:-$PROTOCOL_CONCURRENCY}"
+DOWNLOAD_ATTEMPTS=5   # the dataset download resumes where it left off, so retries are cheap
+RETRY_WAIT_SECONDS=75
+PINNED_REVISION="54a96a6fb6a2bd3b297e59869491db4d3625b711"
+
 ENDPOINT="${DEFAULT_ENDPOINT:-}"
-KEY="${TACKLE_API_KEY:-}"
+KEY="${ENDPOINT_API_KEY:-}"
 while [ $# -gt 0 ]; do case "$1" in
   --endpoint) ENDPOINT="${2:?--endpoint needs a URL}"; shift 2;;
   --key) KEY="${2:?--key needs a value}"; shift 2;;
@@ -20,7 +38,11 @@ while [ $# -gt 0 ]; do case "$1" in
 esac; done
 [ -n "$ENDPOINT" ] || { echo "usage: reproduce.sh <model> --endpoint URL [--key KEY]"; exit 1; }
 ENDPOINT="${ENDPOINT%/}"
-HERE="$(cd "$(dirname "$0")" && pwd)"
+if [ "$CONCURRENCY" != "$PROTOCOL_CONCURRENCY" ]; then
+  echo "!! WARNING: CONCURRENCY=$CONCURRENCY is not the published protocol ($PROTOCOL_CONCURRENCY in flight)."
+  echo "   The outputs are still valid, but the run is not a like-for-like reproduction"
+  echo "   of our serving regime; say so next to any number you report from it."
+fi
 NAME=$(basename "$MODEL" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '_' | sed 's/_*$//')
 AUTH_ARGS=()
 [ -n "$KEY" ] && AUTH_ARGS=(-H "Authorization: Bearer $KEY")
@@ -36,7 +58,9 @@ if ! MODELS_JSON=$(curl -sf -m 10 ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} "$ENDPOINT/v
   CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 10 ${AUTH_ARGS[@]+"${AUTH_ARGS[@]}"} "$ENDPOINT/v1/models" || true)
   case "$CODE" in
     401|403) echo "!! $ENDPOINT rejected the request (HTTP $CODE)."
-             echo "   Check your key (--key or TACKLE_API_KEY). Keys expire 7 days after issue.";;
+             echo "   Check the key you passed with --key (or ENDPOINT_API_KEY): it must be a key"
+             echo "   for THAT endpoint. This script talks to any OpenAI-compatible API, not to"
+             echo "   the TackleAI verification gateway (use verify.sh for that).";;
     *)       echo "!! cannot reach $ENDPOINT/v1/models";;
   esac
   exit 1
@@ -62,8 +86,6 @@ if [ -e "$HERE/bench_data" ] && [ ! -L "$HERE/bench_data" ]; then
 fi
 # classic download path (see get_dataset.sh for the rate-limit math); no HF account needed
 export HF_HUB_DISABLE_XET=1
-DOWNLOAD_ATTEMPTS=5   # the download resumes where it left off, so retries are cheap
-RETRY_WAIT_SECONDS=75
 if [ ! -d "$HERE/bench_data/pdfs" ]; then
   echo ">> downloading olmOCR-bench data (~450 MB, one time)"
   # huggingface_hub >= 1.0 ships `hf`; older versions ship `huggingface-cli`
@@ -73,7 +95,7 @@ if [ ! -d "$HERE/bench_data/pdfs" ]; then
   for attempt in $(seq 1 "$DOWNLOAD_ATTEMPTS"); do
     # pinned to the dataset revision our published numbers were measured against
     if "$HF_CLI" download allenai/olmOCR-bench --repo-type dataset \
-      --revision 54a96a6fb6a2bd3b297e59869491db4d3625b711 \
+      --revision "$PINNED_REVISION" \
       --local-dir "$HERE/olmOCR-bench"; then ok=1; break; fi
     echo ">> download interrupted; resuming in ${RETRY_WAIT_SECONDS}s (attempt $attempt of $DOWNLOAD_ATTEMPTS)"
     sleep "$RETRY_WAIT_SECONDS"
@@ -82,13 +104,12 @@ if [ ! -d "$HERE/bench_data/pdfs" ]; then
   ln -sfn "$HERE/olmOCR-bench/bench_data" "$HERE/bench_data"
 fi
 
-# 2) run all pages (native prompt, 2400px renders, temp 0) -> markdown tree.
-# CONCURRENCY = the one global in-flight cap; 32 matches the per-key limit
-# on the public endpoint, which is sized to the serving pool.
+# 2) run all pages (native prompt, 2400px renders, temp 0) -> markdown tree,
+#    CONCURRENCY pages in flight at once (the protocol's one global cap).
 python3 "$HERE/protocol/run_pages.py" \
   --endpoint "$ENDPOINT/v1/chat/completions" --model "$API_MODEL" \
   --pdfs "$HERE/bench_data/pdfs" --out "$HERE/bench_data/$NAME" \
-  --concurrency "${CONCURRENCY:-32}" ${KEY:+--key "$KEY"}
+  --concurrency "$CONCURRENCY" ${KEY:+--key "$KEY"}
 
 # 3) completeness gate: a partial tree is never scored. The official scorer
 # reports a hard failure on ANY missing page, so a transient network blip

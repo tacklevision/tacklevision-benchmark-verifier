@@ -14,6 +14,10 @@ import sys
 
 CLAIM_LOW, CLAIM_HIGH = 86.1, 86.6   # published claim on the benchmark page
 NOISE = 1.0                          # "differences under a point are noise"
+# one per-category row of the scorer's "Results by JSONL file" block. The
+# scorer prints 7 categories as <name>.jsonl and the 8th as bare "baseline";
+# all 8 are in its headline average, so all 8 must be in this table
+CATEGORY_ROW_RE = r"^\s+([a-z0-9_]+(?:\.jsonl)?)\s*:\s*([\d.]+)%\s*\((\d+)/(\d+)"
 
 BOLD, DIM, RESET = "\033[1m", "\033[2m", "\033[0m"
 GREEN, YELLOW, CYAN = "\033[32m", "\033[33m", "\033[36m"
@@ -42,7 +46,7 @@ FRIENDLY = {
     "old_scans.jsonl": "Old scans",
     "old_scans_math.jsonl": "Old scans, handwritten math",
     "table_tests.jsonl": "Tables",
-    "base.jsonl": "Baseline output checks",
+    "baseline": "Baseline (page has real text; counts in the average)",
 }
 
 
@@ -66,8 +70,7 @@ def parse(log_path):
         return None
     m = heads[-1]
     cats = []
-    for cm in re.finditer(r"^\s+([a-z0-9_]+\.jsonl)\s*:\s*([\d.]+)%\s*\((\d+)/(\d+)",
-                          txt[m.end():], re.M):
+    for cm in re.finditer(CATEGORY_ROW_RE, txt[m.end():], re.M):
         cats.append((cm.group(1), float(cm.group(2)), int(cm.group(3)), int(cm.group(4))))
     return {"name": m.group(1), "score": float(m.group(2)),
             "pm": float(m.group(3)) if m.group(3) else None, "cats": cats}
@@ -119,6 +122,10 @@ def main():
         for cat, pct, ok, tot in r["cats"]:
             name = FRIENDLY.get(cat, cat)
             line(f"  {name:<44s}{pct:5.1f}%  {ok:>5d}/{tot:<5d}")
+        # the headline IS the plain average of these rows (the scorer's
+        # "average of per-JSONL scores"); show it so the table visibly adds up
+        avg = sum(c[1] for c in r["cats"]) / len(r["cats"])
+        line(f"  {DIM}average of the {len(r['cats'])} rows above = {avg:.2f}%{RESET}")
         line()
     print(color + "└" + "─" * (W - 2) + "┘" + RESET)
 

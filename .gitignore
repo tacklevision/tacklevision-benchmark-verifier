@@ -10,3 +10,6 @@ gallery_*.html
 .tv_last_run
 .python/
 .python_download.tar.gz
+.tv_pending
+.venv.tmp/
+*.part
