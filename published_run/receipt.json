@@ -1,15 +1,16 @@
 {
- "run_id": "6665a6572e5b",
- "mode": "upload",
+ "run_id": "ed7e900eb91b",
+ "mode": "revision",
+ "client_reported_manifest_sha256": "fded36af2edbe541ee822ffd623d192560b7b14aefdb828b62c2961e94005d51",
  "dataset": "allenai/olmOCR-bench",
  "dataset_revision": "54a96a6fb6a2bd3b297e59869491db4d3625b711",
  "dataset_manifest_sha256": "fded36af2edbe541ee822ffd623d192560b7b14aefdb828b62c2961e94005d51",
  "model": "tacklevision",
  "pages": 1403,
- "output_tree_sha256": "2c98139b6f1ab3d4c004d3886dfc74e693eda20979087c4679d564be0c4e495a",
+ "output_tree_sha256": "1d67ca8feafe2592f1097f838e74295720c25ab93534c31dd12f91394617e43a",
  "scorer_pin": "olmocr[bench]==0.4.27",
- "started_at": 1787163737,
- "finished_at": 1787164280,
- "note": "score outputs locally with AllenAI's official tool; our own scoring of this tree is our_score (informational)",
+ "started_at": 1787679258,
+ "finished_at": 1787679821,
+ "note": "score these outputs yourself with AllenAI's official tool on your machine; that local score is the verification. our_score is our own run of the same tool, informational only",
  "our_score": "86.2"
 }
