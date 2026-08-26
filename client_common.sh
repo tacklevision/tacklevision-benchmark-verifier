@@ -10,7 +10,7 @@
 # newer than that are used).
 
 # ---- gateway ---------------------------------------------------------------
-DEFAULT_API="https://mk7y315169.execute-api.us-east-1.amazonaws.com/v1"
+DEFAULT_API="https://nfsii7swxl.execute-api.us-east-1.amazonaws.com/v1"
 API="${TV_API_URL:-$DEFAULT_API}"
 KEY_REQUEST_URL="https://tackle.ai/tacklevision-benchmark/"
 RESULTS_KEPT_DAYS=30            # finished runs stay downloadable this long
