@@ -12,7 +12,7 @@ Python 3.12 or newer if you have it (on Ubuntu/Debian/WSL also `python3-venv`:
 fetch a private, checksum-verified copy into its own folder (asks first,
 touches nothing system-wide). A verification key is free: request one at
 https://tackle.ai/tacklevision-benchmark/ (usually approved within one
-business day, valid for 7 days; expired keys are re-requestable with the same
+business day, valid for 2 days; expired keys are re-requestable with the same
 form).
 
 ## The one-command version
