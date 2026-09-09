@@ -20,6 +20,10 @@ cd "$HERE"
 TOTAL_STAGES=5
 PY_MIN_MAJOR=3                         # the hash-pinned toolchain (requirements.lock) is built for 3.12+
 PY_MIN_MINOR=12
+# exclusive upper bound. AllenAI's scorer does not import on 3.14: argparse there
+# rejects the bare % in its --confidence_level help string (allenai/olmocr#451).
+# Without this the run fails at stage 5, after the GPU work is already done.
+PY_MAX_MINOR=14
 # the private CPython offered when no usable Python exists: one exact build of
 # python-build-standalone (the same builds tools like uv ship)
 PBS_RELEASE="20260814"; PBS_VERSION="3.12.14"
@@ -53,8 +57,8 @@ stage() {  # stage <n> <title>
   echo "${BOLD}${CYAN}[$1/$TOTAL_STAGES] $2${RESET}"
 }
 
-py_ok() {  # py_ok <interpreter> : at least PY_MIN
-  "$1" -c "import sys; sys.exit(0 if sys.version_info >= ($PY_MIN_MAJOR, $PY_MIN_MINOR) else 1)" 2>/dev/null
+py_ok() {  # py_ok <interpreter> : PY_MIN <= version < PY_MAX
+  "$1" -c "import sys; sys.exit(0 if ($PY_MIN_MAJOR, $PY_MIN_MINOR) <= sys.version_info[:2] < ($PY_MIN_MAJOR, $PY_MAX_MINOR) else 1)" 2>/dev/null
 }
 
 # the run this folder is working on: '' when there is none (an empty file counts as none)
@@ -180,13 +184,15 @@ if [ -z "$PY" ]; then
     Linux-aarch64) PBS_ARCH="aarch64-unknown-linux-gnu"; PBS_SHA="4952b18bafda1880d4ab1f86e1c348dbdb31f0e6d049e76dc5f052f2f796f1c5";;
     *) PBS_ARCH="";;
   esac
-  echo "   ${RED}No Python $PY_MIN_MAJOR.$PY_MIN_MINOR or newer found on this machine.${RESET}"
+  echo "   ${RED}No Python $PY_MIN_MAJOR.$PY_MIN_MINOR or $PY_MIN_MAJOR.13 found on this machine.${RESET}"
+  echo "   ${DIM}Python 3.14 does not work yet: AllenAI's scorer fails to start on it${RESET}"
+  echo "   ${DIM}(upstream bug, allenai/olmocr#451). 3.12 and 3.13 are both fine.${RESET}"
   if [ -n "$PBS_ARCH" ] && [ -t 0 ]; then
     echo
     echo "   Press Enter and verify.sh will download a private, checksum-verified"
     echo "   copy of Python $PBS_VERSION into this folder only (nothing is installed on"
     echo "   your system; delete this folder to remove it)."
-    echo "   Or press Ctrl-C and install Python $PY_MIN_MAJOR.$PY_MIN_MINOR or newer yourself (https://python.org)."
+    echo "   Or press Ctrl-C and install Python $PY_MIN_MAJOR.$PY_MIN_MINOR or $PY_MIN_MAJOR.13 yourself (https://python.org)."
     read -r _
     PBS_FILE="cpython-${PBS_VERSION}+${PBS_RELEASE}-${PBS_ARCH}-install_only.tar.gz"
     PBS_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE}/${PBS_FILE}"
