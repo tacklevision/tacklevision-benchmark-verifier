@@ -160,6 +160,9 @@ def main():
     line(f"  {DIM}raw scorer output kept in this folder: {os.path.basename(args.scorer_log)}{RESET}")
     print(color + "└" + "─" * (W - 2) + "┘" + RESET)
     print()
+    # exit status carries the verdict for the caller: 0 in band, 2 outside it
+    # (1 = no score found, above)
+    sys.exit(0 if in_band else 2)
 
 
 if __name__ == "__main__":

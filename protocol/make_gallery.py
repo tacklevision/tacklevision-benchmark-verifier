@@ -12,6 +12,7 @@ broken pretty rendering.
 Usage: make_gallery.py <bench_data> <outputs_dir> <out.html> [n_samples]
 """
 import base64
+import json
 import html
 import io
 import os
@@ -19,7 +20,15 @@ import random
 import sys
 from collections import defaultdict
 
-SHOWCASE = ["old_scans", "old_scans_math", "table_tests", "multi_column"]
+# The scanned categories are where the model's work is visible: degraded pages,
+# handwriting, handwritten math. Half the sample comes from their DENSEST pages
+# (top quartile by the benchmark's own tests-per-page, read from the same jsonl
+# the scorer uses), so nobody's gallery is a clean typed page with a signature.
+# The signal is the benchmark's and is fixed before scoring: it says nothing
+# about how the model did on those pages.
+DENSE_CATS = ["old_scans", "old_scans_math"]
+DENSE_QUANTILE = 0.75        # "dense" = at or above this quantile of tests per page
+DENSE_SHARE = 0.5            # share of the sample drawn from the dense pools
 
 
 def collect_pairs(bd, out):
@@ -38,25 +47,64 @@ def collect_pairs(bd, out):
     return by_cat
 
 
-def stratified_sample(by_cat, n):
-    picks = []
-    for cat, items in by_cat.items():
-        picks.append(random.choice(items))
-    extras_pool = [it for cat in SHOWCASE for it in by_cat.get(cat, [])]
-    everything = [it for items in by_cat.values() for it in items]
-    chosen = {p[2] for p in picks}
-    while len(picks) < n:
-        pool = extras_pool if len(picks) < n * 3 // 4 and extras_pool else everything
-        cand = random.choice(pool)
-        if cand[2] in chosen:
-            if len(chosen) >= len(everything):
-                break
+def dense_pages(bd):
+    """{cat: {pdf basename, ...}}: the densest pages per DENSE_CATS, from bd/<cat>.jsonl.
+    A missing or unreadable jsonl just leaves that category unfiltered."""
+    out = {}
+    for cat in DENSE_CATS:
+        counts = defaultdict(int)
+        try:
+            with open(os.path.join(bd, cat + ".jsonl")) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        counts[os.path.basename(json.loads(line)["pdf"])] += 1
+        except Exception:
             continue
-        picks.append(cand)
-        chosen.add(cand[2])
-    # old scans lead; the rest shuffled for variety
-    lead = [p for p in picks if p[0] == "old_scans"]
-    rest = [p for p in picks if p[0] != "old_scans"]
+        if not counts:
+            continue
+        vals = sorted(counts.values())
+        cut = vals[min(len(vals) - 1, int(len(vals) * DENSE_QUANTILE))]
+        out[cat] = {name for name, c in counts.items() if c >= cut}
+    return out
+
+
+def stratified_sample(by_cat, n, dense=None):
+    dense = dense or {}
+
+    def pool(cat):  # a category's pages, narrowed to its dense pages when known
+        items = by_cat.get(cat, [])
+        keep = dense.get(cat)
+        narrowed = [it for it in items if keep and os.path.basename(it[1]) in keep]
+        return narrowed or items
+
+    picks, chosen = [], set()
+
+    def take(it):
+        picks.append(it)
+        chosen.add(it[2])
+
+    for cat in by_cat:                               # every category shows up once
+        take(random.choice(pool(cat)))
+    pools = {cat: [it for it in pool(cat) if it[2] not in chosen] for cat in DENSE_CATS}
+    want_dense = int(round(n * DENSE_SHARE))
+    turn = 0
+    # alternate between the scan categories so handwriting gets as many slots as old scans
+    while sum(p[0] in DENSE_CATS for p in picks) < want_dense and any(pools.values()) and len(picks) < n:
+        cat = DENSE_CATS[turn % len(DENSE_CATS)]
+        turn += 1
+        if not pools[cat]:
+            continue
+        it = random.choice(pools[cat])
+        pools[cat].remove(it)
+        take(it)
+    everything = [it for items in by_cat.values() for it in items if it[2] not in chosen]
+    while len(picks) < n and everything:              # wildcards fill the rest
+        it = random.choice(everything)
+        everything.remove(it)
+        take(it)
+    lead = [p for p in picks if p[0] in DENSE_CATS]  # scans first
+    rest = [p for p in picks if p[0] not in DENSE_CATS]
     random.shuffle(rest)
     return (lead + rest)[:n]
 
@@ -107,7 +155,7 @@ def main():
     if not by_cat:
         print("no document/output pairs found", file=sys.stderr)
         sys.exit(1)
-    sample = stratified_sample(by_cat, n)
+    sample = stratified_sample(by_cat, n, dense_pages(bd))
 
     cards = []
     for cat, pdf, md in sample:
@@ -136,10 +184,12 @@ def main():
 <style>{CSS}</style></head><body><div class="wrap">
 <h1>What is being tested</h1>
 <p class="sub">A sample of {len(cards)} of the 1,403 pages in AllenAI's
-olmOCR benchmark (every category represented), rendered from the verified copy
-on your machine, with the model's reading of each page beside it, shown
-exactly as the scorer judged it, byte for byte. Every other page can be
-inspected the same way in
+olmOCR benchmark, rendered from the verified copy on your machine, with the
+model's reading of each page beside it, shown exactly as the scorer judged it,
+byte for byte. How the sample is picked: half comes from the densest pages in
+the two scanned categories (old scans, handwritten math), by the benchmark's
+own test count and chosen before scoring; the rest covers every other
+category. Every page can be inspected the same way in
 <code>bench_data/pdfs/</code>; rerun scoring for a fresh sample.</p>
 {''.join(cards)}
 </div></body></html>"""

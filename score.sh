@@ -94,17 +94,20 @@ echo "   its progress bar is misleading early on. Repeat runs take a few minutes
 echo
 echo "   The published claim you are about to check: ${BOLD}$CLAIM_TEXT${RESET}"
 echo
-# said now, while they are still reading: a passing run prints over a thousand
-# [FAIL] lines, and every tester so far read them as the tool breaking
-echo "   ${BOLD}About the [FAIL] lines you are about to see.${RESET} The scorer prints one for every"
-echo "   individual test that does not pass. At the published score $FAIL_SHARE_TEXT of its"
-echo "   $SCORER_TESTS_TEXT tests fail, so well over a thousand [FAIL] lines will scroll past."
-echo "   That is what a passing score looks like. It is not an error and nothing is wrong."
+# said now, while they are still reading. The scorer's per-test output goes to a
+# file (below) rather than the screen: a passing run prints over a thousand [FAIL]
+# lines, and every tester who saw them scroll past read them as the tool breaking.
+echo "   ${BOLD}What shows here:${RESET} the scorer's progress bar. Its per-test results go to"
+echo "   $(basename "$SCORER_LOG") in this folder, unmodified. That file will hold over a thousand"
+echo "   [FAIL] lines: the scorer prints one for every test that does not pass, and at the"
+echo "   published score $FAIL_SHARE_TEXT of its $SCORER_TESTS_TEXT tests fail. That is what a passing"
+echo "   score looks like, not an error. Open the file if you want to see every one."
 echo
 
-# stdout (summary + per-test results) is preserved verbatim for inspection;
-# the scorer's live progress stays on screen
-python3 -m olmocr.bench.benchmark --dir "$STAGE" | tee "$SCORER_LOG"
+# stdout (summary + every per-test result) goes verbatim to the log file, where
+# it is kept for inspection; the scorer's live progress bar is on stderr and
+# stays on screen. Nothing about the scorer changes, only where its output lands.
+python3 -m olmocr.bench.benchmark --dir "$STAGE" > "$SCORER_LOG"
 
 # every verification counts: record the score on the independent-run ledger
 # (only for real gateway runs: needs your key and this run's receipt). It happens
@@ -134,8 +137,13 @@ fi
 
 # the same numbers, readable: the verdict, with this run's timing and provenance
 # inside the frame so nothing important trails below it
-python3 "$HERE/protocol/verdict.py" "$SCORER_LOG" ${RECEIPT:+--receipt "$RECEIPT"} \
-  --scoring-started "$SCORE_T0" ${TV_RUN_STARTED:+--started "$TV_RUN_STARTED"} || true
+# verdict.py exits 0 when the score is in band with the published claim
+# (2 outside it, 1 if it found no score); the prompt below says "Verified" only then
+IN_BAND=0
+if python3 "$HERE/protocol/verdict.py" "$SCORER_LOG" ${RECEIPT:+--receipt "$RECEIPT"} \
+     --scoring-started "$SCORE_T0" ${TV_RUN_STARTED:+--started "$TV_RUN_STARTED"}; then
+  IN_BAND=1
+fi
 
 # ---- the last things on screen ---------------------------------------------
 # The gallery (real benchmark pages next to what the model read from them) is the
@@ -153,7 +161,13 @@ open_in_browser() {  # best effort and quiet; returns 1 when nothing here can op
 echo
 if [ -f "$GALLERY" ]; then
   if [ -t 0 ] && [ -t 1 ]; then
-    printf "   Open the %s tested pages next to what the model read from them? [Y/n] " "$GALLERY_SAMPLES"
+    if [ "$IN_BAND" = 1 ]; then
+      echo "   ${BOLD}Verified with AllenAI's official scorer, on this machine.${RESET} Now see the work:"
+    else
+      echo "   ${BOLD}Scored with AllenAI's official scorer, on this machine.${RESET} See the work:"
+    fi
+    echo "   $GALLERY_SAMPLES pages, the original next to what the model read."
+    printf "   Open in your browser? [Y/n] "
     read -r ans || ans=""
     case "$ans" in
       [nN]*) echo "   ${DIM}When you want it, open this in a browser: $GALLERY${RESET}";;
