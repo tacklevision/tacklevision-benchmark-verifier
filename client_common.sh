@@ -13,6 +13,7 @@
 DEFAULT_API="https://nfsii7swxl.execute-api.us-east-1.amazonaws.com/v1"
 API="${TV_API_URL:-$DEFAULT_API}"
 KEY_REQUEST_URL="https://tackle.ai/tacklevision-benchmark/"
+DEMO_URL="https://tackle.ai/demo/"                  # the closing line: run it on your own documents
 RESULTS_KEPT_DAYS=30            # finished runs stay downloadable this long
 TOTAL_PAGES_TEXT="1,403"        # the benchmark's page count, for messages
 HTTP_TIMEOUT="${TV_HTTP_TIMEOUT:-30}"                     # per API call, seconds

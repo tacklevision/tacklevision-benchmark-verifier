@@ -7,13 +7,13 @@ You verify three things yourself, on your machine:
 3. the score, computed by YOU with AllenAI's official scorer. We never touch it.
 
 Needs: Linux or macOS (Windows: WSL), ~10 GB disk, internet. No GPU.
-Python 3.12 or newer if you have it (on Ubuntu/Debian/WSL also `python3-venv`:
-`sudo apt install python3.12 python3.12-venv`); if not, verify.sh offers to
-fetch a private, checksum-verified copy into its own folder (asks first,
-touches nothing system-wide). A verification key is free: request one at
-https://tackle.ai/tacklevision-benchmark/ (usually approved within one
-business day, valid for 2 days; expired keys are re-requestable with the same
-form).
+Python 3.12 or 3.13 if you have it, not 3.14 yet (on Ubuntu/Debian/WSL also
+`python3-venv`: `sudo apt install python3.12 python3.12-venv`); if not,
+verify.sh offers to fetch a private, checksum-verified copy into its own
+folder (asks first, touches nothing system-wide). A verification key is
+free: request one at https://tackle.ai/tacklevision-benchmark/ (usually
+approved within one business day, valid for 48 hours; expired keys are
+re-requestable with the same form).
 
 ## The one-command version
 
@@ -63,7 +63,7 @@ bash score.sh published_run/outputs.tar.gz
 Skeptics are encouraged to run and read the stages individually:
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate   # Python 3.12 or newer
+python3 -m venv .venv && source .venv/bin/activate   # Python 3.12 or 3.13, not 3.14
 pip install --require-hashes -r requirements.lock   # hash-pinned scorer toolchain
 bash get_dataset.sh                  # official dataset + manifest proof
 bash submit.sh bench_data            # attested run on our GPU cluster

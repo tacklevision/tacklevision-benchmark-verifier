@@ -11,11 +11,14 @@ TAR="${1:?usage: score.sh outputs_<run>.tar.gz}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
 . "$HERE/client_common.sh"
+SCORE_T0=$(date +%s)   # scoring started; the verdict shows how long it took
 
 # ---- constants -------------------------------------------------------------
 PINNED_MANIFEST="fded36af2edbe541ee822ffd623d192560b7b14aefdb828b62c2961e94005d51"
 GALLERY_SAMPLES=12
 CLAIM_TEXT="86.1 to 86.6"          # the published claim being checked
+SCORER_TESTS_TEXT="~8,400"         # how many individual tests the scorer runs, for the [FAIL] note
+FAIL_SHARE_TEXT="roughly 1 in 7"   # the share of them that fails at the published score (100 - ~86 percent)
 BD="$HERE/bench_data"
 
 [ -d "$BD/pdfs" ] || { echo "!! bench_data not found next to score.sh. Run get_dataset.sh first, from the verifier repo."; exit 1; }
@@ -91,22 +94,21 @@ echo "   its progress bar is misleading early on. Repeat runs take a few minutes
 echo
 echo "   The published claim you are about to check: ${BOLD}$CLAIM_TEXT${RESET}"
 echo
+# said now, while they are still reading: a passing run prints over a thousand
+# [FAIL] lines, and every tester so far read them as the tool breaking
+echo "   ${BOLD}About the [FAIL] lines you are about to see.${RESET} The scorer prints one for every"
+echo "   individual test that does not pass. At the published score $FAIL_SHARE_TEXT of its"
+echo "   $SCORER_TESTS_TEXT tests fail, so well over a thousand [FAIL] lines will scroll past."
+echo "   That is what a passing score looks like. It is not an error and nothing is wrong."
+echo
 
 # stdout (summary + per-test results) is preserved verbatim for inspection;
 # the scorer's live progress stays on screen
 python3 -m olmocr.bench.benchmark --dir "$STAGE" | tee "$SCORER_LOG"
 
-# the same numbers, readable
-python3 "$HERE/protocol/verdict.py" "$SCORER_LOG" ${RECEIPT:+--receipt "$RECEIPT"} || true
-
-if [ -f "$GALLERY" ]; then
-  echo "   See what was tested, page by page (opens in a browser):"
-  echo "   ${GREEN}$GALLERY${RESET}"
-  echo
-fi
-
 # every verification counts: record the score on the independent-run ledger
-# (only for real gateway runs: needs your key and this run's receipt)
+# (only for real gateway runs: needs your key and this run's receipt). It happens
+# before the verdict and the prompt below, so a Ctrl-C at the prompt still counts.
 SCORE=$(tr '\r' '\n' < "$SCORER_LOG" | grep "average of per-JSONL scores" | tail -1 \
         | grep -oE "[0-9]+\.[0-9]+" | head -1 || true)
 if [ -n "${TV_API_KEY:-}" ] && [ -n "$SCORE" ] && [ -f "$HERE/receipt_${RUN_TAG}.json" ]; then
@@ -114,7 +116,7 @@ if [ -n "${TV_API_KEY:-}" ] && [ -n "$SCORE" ] && [ -f "$HERE/receipt_${RUN_TAG}
   http_post "$API/runs/${RUN_TAG}/result" "{\"score\": $SCORE}"
   MSG=$(echo "$BODY" | j error)
   case "$HTTP" in
-    200) echo "   Your score ($SCORE) is recorded on the independent-run ledger. Thank you.";;
+    200) echo "   ${DIM}Your score ($SCORE) is recorded on the independent-run ledger. Thank you.${RESET}";;
     401|403)
       # a run is bound to the key that started it; a new key would not reach it
       echo "   ${DIM}this key can no longer reach run ${RUN_TAG} (HTTP $HTTP), so the score was not"
@@ -128,9 +130,46 @@ if [ -n "${TV_API_KEY:-}" ] && [ -n "$SCORE" ] && [ -f "$HERE/receipt_${RUN_TAG}
       echo "   ${DIM}(could not reach the ledger to record $SCORE (HTTP $HTTP);"
       echo "   your outputs and receipt are saved; rerun score.sh later to record the score)${RESET}";;
   esac
-  echo
 fi
 
+# the same numbers, readable: the verdict, with this run's timing and provenance
+# inside the frame so nothing important trails below it
+python3 "$HERE/protocol/verdict.py" "$SCORER_LOG" ${RECEIPT:+--receipt "$RECEIPT"} \
+  --scoring-started "$SCORE_T0" ${TV_RUN_STARTED:+--started "$TV_RUN_STARTED"} || true
+
+# ---- the last things on screen ---------------------------------------------
+# The gallery (real benchmark pages next to what the model read from them) is the
+# most persuasive thing this run produced, and a bare file path gets ignored. So
+# when there is a person at the terminal, offer to open it. Not a TTY (piped,
+# CI, a log): print the path and move on, never block.
+open_in_browser() {  # best effort and quiet; returns 1 when nothing here can open a file
+  case "$(uname -s)" in
+    Darwin) command -v open >/dev/null 2>&1 && open "$1" ;;
+    *) if command -v xdg-open >/dev/null 2>&1; then xdg-open "$1" >/dev/null 2>&1
+       elif command -v wslview >/dev/null 2>&1; then wslview "$1" >/dev/null 2>&1
+       else return 1; fi ;;
+  esac
+}
+echo
+if [ -f "$GALLERY" ]; then
+  if [ -t 0 ] && [ -t 1 ]; then
+    printf "   Open the %s tested pages next to what the model read from them? [Y/n] " "$GALLERY_SAMPLES"
+    read -r ans || ans=""
+    case "$ans" in
+      [nN]*) echo "   ${DIM}When you want it, open this in a browser: $GALLERY${RESET}";;
+      *) open_in_browser "$GALLERY" && echo "   ${DIM}opened in your browser${RESET}" \
+           || echo "   ${DIM}No browser could be opened from here. Open this file yourself: $GALLERY${RESET}";;
+    esac
+  else
+    echo "   See what was tested, page by page (opens in a browser): ${GREEN}$GALLERY${RESET}"
+  fi
+  echo
+fi
+if [ -n "${TV_RUN_STARTED:-}" ]; then   # only when verify.sh ran the whole thing
+  echo "   ${DIM}Run it again any time: bash verify.sh --key <your key>"
+  echo "   (this starts a new run; add --fresh to be explicit)${RESET}"
+  echo
+fi
 echo "${BOLD}   That was the public benchmark. Your documents are the real test.${RESET}"
-echo "   See TackleVision on them: ${GREEN}https://tackle.ai/demo/${RESET}"
+echo "   See TackleVision on them: ${GREEN}$DEMO_URL${RESET}"
 echo

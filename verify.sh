@@ -35,6 +35,7 @@ CHROMIUM_SIZE_TEXT="~150 MB"
 
 CYAN=$'\033[36m'
 T0=$(date +%s)
+export TV_RUN_STARTED="$T0"   # score.sh shows the total time inside the verdict
 
 usage() { echo "usage: bash verify.sh --key tv-XXXX [--fresh]   (the key is in your approval email)"; exit 1; }
 KEY="${TV_API_KEY:-}"
@@ -314,6 +315,5 @@ bash score.sh "$OUT_TAR" || fail 5 $?
 # before this line re-downloads or re-scores the same run, never a new one
 rm -f "$STATE_FILE"
 
-echo "${DIM}  Total time: $(elapsed $T0). Run it again any time: bash verify.sh --key <your key>"
-echo "  (this starts a new run; add --fresh to be explicit)${RESET}"
-echo
+# The total time and the rerun hint now print from score.sh (in and just under the
+# verdict), so the run ends on its closing line rather than a footer from here.

@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+import time
 
 CLAIM_LOW, CLAIM_HIGH = 86.1, 86.6   # published claim on the benchmark page
 NOISE = 1.0                          # "differences under a point are noise"
@@ -46,7 +47,7 @@ FRIENDLY = {
     "old_scans.jsonl": "Old scans",
     "old_scans_math.jsonl": "Old scans, handwritten math",
     "table_tests.jsonl": "Tables",
-    "baseline": "Baseline (page has real text; counts in the average)",
+    "baseline": "Baseline (page has text; in the average)",   # <= 44 chars: the table column
 }
 
 
@@ -59,6 +60,12 @@ def big(text):
         for i in range(5):
             rows[i] += "".join("██" if c == "#" else "  " for c in pat[i]) + "  "
     return [r.rstrip() for r in rows]
+
+
+def fmt_dur(sec):
+    sec = max(0, int(sec))
+    m, s = divmod(sec, 60)
+    return f"{m} min {s} s" if m else f"{s} s"
 
 
 def parse(log_path):
@@ -80,6 +87,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("scorer_log")
     ap.add_argument("--receipt", help="receipt_<run>.json for provenance footer")
+    ap.add_argument("--started", type=int, help="epoch seconds the whole run began (verify.sh)")
+    ap.add_argument("--scoring-started", type=int, help="epoch seconds scoring began (score.sh)")
     args = ap.parse_args()
 
     r = parse(args.scorer_log)
@@ -127,18 +136,29 @@ def main():
         avg = sum(c[1] for c in r["cats"]) / len(r["cats"])
         line(f"  {DIM}average of the {len(r['cats'])} rows above = {avg:.2f}%{RESET}")
         line()
-    print(color + "└" + "─" * (W - 2) + "┘" + RESET)
-
-    print(f"{DIM}   scored by AllenAI's official olmOCR-bench tool, unmodified, on this")
-    print("   machine, over outputs you can read page by page.")
+    # how long it took, answered here because "how long did it take" is the one
+    # question every tester gets asked and nobody could answer after walking away
+    now = int(time.time())
+    parts = []
+    if args.started:
+        parts.append(f"{fmt_dur(now - args.started)} in total")
+    if args.scoring_started:
+        parts.append(f"scoring {fmt_dur(now - args.scoring_started)}")
+    if parts:
+        line(f"  time: {parts[0]}" + (f" ({parts[1]})" if len(parts) == 2 else ""))
+        line()
+    # provenance, inside the frame: what scored it, which run, where the raw log is
+    line(f"  {DIM}scored by AllenAI's official olmOCR-bench tool, unmodified, on this{RESET}")
+    line(f"  {DIM}machine, over outputs you can read page by page.{RESET}")
     if args.receipt and os.path.exists(args.receipt):
         try:
             rc = json.load(open(args.receipt))
-            print(f"   run {rc.get('run_id', '?')} · model {rc.get('model', '?')} · "
-                  f"dataset manifest {str(rc.get('dataset_manifest_sha256', ''))[:16]}...")
+            line(f"  {DIM}run {str(rc.get('run_id', '?'))[:12]} · model {rc.get('model', '?')} · "
+                 f"manifest {str(rc.get('dataset_manifest_sha256', ''))[:12]}...{RESET}")
         except Exception:
             pass
-    print(f"   raw scorer output preserved at: {args.scorer_log}{RESET}")
+    line(f"  {DIM}raw scorer output kept in this folder: {os.path.basename(args.scorer_log)}{RESET}")
+    print(color + "└" + "─" * (W - 2) + "┘" + RESET)
     print()
 
 
